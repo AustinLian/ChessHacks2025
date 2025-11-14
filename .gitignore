@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyc
+venv/
+env/
+ENV/
+.venv
+
+# C++
+*.o
+*.obj
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Training artifacts
+*.pt
+*.pth
+*.onnx
+training/data/raw_pgn/*.pgn
+training/data/processed/*.npz
+training/data/processed/*.hdf5
+
+# Self-play
+selfplay/buffers/rl_buffer/*.npz
+selfplay/logs/*.log
+
+# Weights (except tracked ones)
+weights/checkpoints/*.pt
+weights/distilled/*.pt
+
+# Temporary files
+*.log
+*.tmp
+.cache/

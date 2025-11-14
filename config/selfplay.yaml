@@ -1,0 +1,34 @@
+# Self-Play Configuration
+selfplay:
+  generation:
+    num_games: 1000
+    concurrent_games: 16
+    resign_threshold: -0.95
+    resign_count: 5
+    temperature_schedule:
+      - moves: 30
+        temperature: 1.0
+      - moves: 999
+        temperature: 0.5
+        
+  opening_book:
+    enabled: true
+    max_moves: 8
+    variety_threshold: 0.1
+    
+  time_control:
+    mode: "nodes"  # or "time"
+    nodes_per_move: 800
+    time_per_move_ms: 1000
+    
+  evaluation:
+    arena_games: 100
+    time_control:
+      base_time_ms: 60000
+      increment_ms: 1000
+    rating_threshold: 50  # Elo improvement to accept new model
+    
+  storage:
+    buffer_format: "npz"
+    compression: true
+    max_buffer_size_gb: 10

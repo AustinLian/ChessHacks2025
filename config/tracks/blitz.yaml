@@ -1,0 +1,20 @@
+# Blitz Track Configuration (Knight's Edge)
+track:
+  name: "blitz"
+  display_name: "Knight's Edge"
+  time_control:
+    base_time_ms: 180000  # 3 minutes
+    increment_ms: 2000    # 2 seconds increment
+    
+engine:
+  search:
+    max_depth: 32  # shallower for time constraints
+    transposition_table_mb: 128
+  time_management:
+    move_overhead_ms: 100
+    time_buffer_ratio: 0.10
+    aggressive_mode: true
+    
+selfplay:
+  time_control:
+    nodes_per_move: 400  # fewer nodes for faster games

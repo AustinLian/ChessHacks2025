@@ -1,0 +1,20 @@
+# Rapid Track Configuration
+track:
+  name: "rapid"
+  display_name: "Rapid"
+  time_control:
+    base_time_ms: 600000   # 10 minutes
+    increment_ms: 5000     # 5 seconds increment
+    
+engine:
+  search:
+    max_depth: 64
+    transposition_table_mb: 512
+  time_management:
+    move_overhead_ms: 50
+    time_buffer_ratio: 0.05
+    aggressive_mode: false
+    
+selfplay:
+  time_control:
+    nodes_per_move: 1600  # more nodes for deeper search

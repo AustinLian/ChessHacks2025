@@ -1,0 +1,49 @@
+# Training Configuration
+training:
+  supervised:
+    epochs: 10
+    batch_size: 512
+    learning_rate: 0.001
+    lr_scheduler:
+      type: "cosine"
+      warmup_epochs: 2
+    optimizer: "adam"
+    weight_decay: 0.0001
+    
+  reinforcement:
+    iterations: 100
+    games_per_iteration: 1000
+    batch_size: 1024
+    learning_rate: 0.0005
+    replay_buffer_size: 500000
+    value_loss_weight: 1.0
+    policy_loss_weight: 1.0
+    
+  dataset:
+    train_split: 0.9
+    val_split: 0.1
+    augmentation:
+      flip_horizontal: true
+      rotate_colors: true
+    
+  checkpointing:
+    save_every_n_epochs: 1
+    keep_last_n: 5
+    best_model_metric: "val_loss"
+    
+model:
+  architecture: "resnet"
+  num_blocks: 10
+  channels: 128
+  policy_head_channels: 32
+  value_head_channels: 32
+  
+  input:
+    board_planes: 12  # 6 piece types * 2 colors
+    history_planes: 8  # last 4 positions * 2 colors
+    auxiliary_planes: 7  # castling, en passant, side to move, etc.
+    total_planes: 27
+    
+  output:
+    policy_size: 4672  # all possible moves (from_sq * to_sq + promotions)
+    value_size: 1  # single value head

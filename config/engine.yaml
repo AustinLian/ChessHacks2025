@@ -1,0 +1,32 @@
+# Engine Configuration
+engine:
+  name: "ChessHacks Engine"
+  version: "0.1.0"
+  author: "ChessHacks2025 Team"
+  
+search:
+  max_depth: 64
+  time_management:
+    move_overhead_ms: 50
+    time_buffer_ratio: 0.05
+  transposition_table_mb: 256
+  
+evaluation:
+  nn_inference:
+    enabled: true
+    backend: "native"  # native C++ inference
+    batch_size: 1
+  fallback_heuristic:
+    material_only: false
+    
+move_ordering:
+  history_heuristic: true
+  killer_moves: true
+  mvv_lva: true
+  
+threading:
+  num_threads: 1  # single-threaded by default
+  
+debug:
+  log_level: "info"
+  perft_validation: false
