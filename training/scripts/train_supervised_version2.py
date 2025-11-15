@@ -130,7 +130,7 @@ def validate(model, dataloader, device):
 
 def main():
     class Args:
-        dataset = "data/training_data.npz"
+        dataset = "training\data\processed\sf_supervised_dataset2024.npz"
         output_dir = "checkpoints"
         epochs = 10
         batch_size = 32
