@@ -30,20 +30,12 @@ class NPZDataset(Dataset):
       - y_policy_best: best move index (0..20479)
       - delta_cp / game_result etc. (can be used as value target)
     """
-
-    def __init__(self, npz_path: str, value_target: str = 'delta_cp'):
+    def __init__(self, npz_path: str, value_target: str = 'delta_cp', value_scale: float = 1.0):
         data = np.load(npz_path)
         self.X = data['X'].astype(np.float32)
         self.y_policy = data['y_policy_best'].astype(np.int64)
-
-        # Choose which scalar target to use for value head
         self.value_target = value_target
-        if value_target not in data:
-            raise ValueError(f"Value target '{value_target}' not found in NPZ dataset")
-        self.y_value = data[value_target].astype(np.float32)
-
-        # Optional: normalize grayscale planes to [-1,1] or 0-1
-        # Assuming planes are already 0/1, scaling to -1..1:
+        self.y_value = data[value_target].astype(np.float32) * value_scale
         self.X = self.X * 2.0 - 1.0
 
     def __len__(self):
