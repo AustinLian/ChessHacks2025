@@ -15,7 +15,7 @@ import numpy as np
 # -----------------------------
 # Add project root to sys.path
 # -----------------------------
-PROJECT_ROOT = Path(__file__).parent.parent.parentresolve() #make sure it has 3 parents here 
+PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve() #make sure it has 3 parents here 
 sys.path.append(str(PROJECT_ROOT))
 
 from training.models.resnet_policy_value import create_model
@@ -28,7 +28,7 @@ MODEL_PATH = PROJECT_ROOT / "checkpoints" / "best_model.pt"
 TEST_DATASET_PATH = PROJECT_ROOT / "training" / "data" / "processed" / "sf_supervised_dataset2024.npz"
 TOP_K = 3
 BATCH_SIZE = 256
-NUM_PLANES = 27      # must match training
+NUM_PLANES =  18     # must match training
 POLICY_DIM = 64*64*5 # 20480
 VALUE_SCALE = 100.0   # scale centipawns to [-1,1] for network
 
