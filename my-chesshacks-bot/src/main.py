@@ -11,7 +11,6 @@ import time
 def test_func(ctx: GameContext):
     # This gets called every time the model needs to make a move
     # Return a python-chess Move object that is a legal move for the current position
-    # dfasdfasd
 
     print("Cooking move...")
     print(ctx.board.move_stack)
