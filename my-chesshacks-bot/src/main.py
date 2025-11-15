@@ -19,6 +19,7 @@ from resnet_policy_value import ResNetPolicyValue
 # Model config
 # -------------------------------
 MODEL_PATH = "F:/VS Code Storage/ChessHacks2025/checkpoints/best_model.pt"
+#MODEL_PATH =    "F:/VS Code Storage/ChessHacks2025/weights/trained_weights.pt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = ResNetPolicyValue(
