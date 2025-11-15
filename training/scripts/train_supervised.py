@@ -1,207 +1,374 @@
-#!/usr/bin/env python3
-"""
-Train policy-value network on PGN dataset (supervised learning).
-"""
-
-import argparse
+import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader, random_split
+
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from pathlib import Path
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
+import torch.nn.functional as F
 
-from models import create_model
-from datasets import PGNDataset
-from utils import (
-    load_config,
-    setup_logger,
-    log_metrics,
-    save_checkpoint,
-    cleanup_old_checkpoints,
-    AverageMeter
-)
+POLICY_DIM = 64 * 64 * 5  # 20,480
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Supervised training on PGN dataset')
-    parser.add_argument('--config', type=str, default='config/training.yaml',
-                        help='Path to training config')
-    parser.add_argument('--dataset', type=str, required=True,
-                        help='Path to processed dataset NPZ file')
-    parser.add_argument('--output-dir', type=str, default='weights/checkpoints',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Resume from checkpoint')
-    return parser.parse_args()
+class SFNPZDataset(Dataset):
+    """
+    Dataset for Stockfish-labeled NPZ.
+
+    Trains on:
+      - policy_idx : best-move index (int)
+      - value_before      : scaled cp_before
+      - value_after_best  : scaled cp_after_best
+      - delta_target      : scaled delta_cp
+    """
+
+    def __init__(
+        self,
+        npz_path: str,
+        cp_scale: float = 400.0,
+        delta_scale: float = 100.0,
+    ):
+        data = np.load(npz_path)
+
+        # Required fields from your generator
+        self.X = data["X"]                          # (N, 18, 8, 8)
+        self.y_policy_best = data["y_policy_best"]  # (N,)
+        self.cp_before = data["cp_before"]          # (N,)
+        self.cp_after_best = data["cp_after_best"]  # (N,)
+        self.delta_cp = data["delta_cp"]            # (N,)
+
+        # Precompute regression targets, scaled into [-1, 1]
+        self.value_before = np.tanh(self.cp_before / cp_scale).astype(np.float32)
+        self.value_after_best = np.tanh(self.cp_after_best / cp_scale).astype(np.float32)
+        self.delta_target = np.tanh(self.delta_cp / delta_scale).astype(np.float32)
+
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        planes = torch.from_numpy(self.X[idx]).float()  # (18, 8, 8)
+        policy_idx = torch.tensor(int(self.y_policy_best[idx]), dtype=torch.long)
+
+        value_before = torch.tensor(self.value_before[idx], dtype=torch.float32)
+        value_after_best = torch.tensor(self.value_after_best[idx], dtype=torch.float32)
+        delta_target = torch.tensor(self.delta_target[idx], dtype=torch.float32)
+
+        return {
+            "planes": planes,
+            "policy_idx": policy_idx,
+            "value_before": value_before,
+            "value_after_best": value_after_best,
+            "delta_target": delta_target,
+        }
 
 
-def train_epoch(model, dataloader, optimizer, device, logger):
-    """Train for one epoch."""
+def collate_sf(batch):
+    """
+    Collate dict -> dict of batched tensors.
+    """
+    out = {}
+    keys = batch[0].keys()
+    for k in keys:
+        out[k] = torch.stack([b[k] for b in batch], dim=0)
+    return out
+
+
+
+
+class DummyChessModel(nn.Module):
+    """
+    Dummy model with:
+      - policy head (logits over 20,480 moves)
+      - value_before head
+      - value_after_best head
+      - delta head
+    """
+
+    def __init__(self, policy_dim: int = POLICY_DIM):
+        super().__init__()
+        # Super simple conv stack
+        self.conv1 = nn.Conv2d(18, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+
+        self.fc_shared = nn.Linear(64 * 8 * 8, 512)
+
+        self.policy_head = nn.Linear(512, policy_dim)
+        self.value_before_head = nn.Linear(512, 1)
+        self.value_after_best_head = nn.Linear(512, 1)
+        self.delta_head = nn.Linear(512, 1)
+
+    def forward(self, x):
+        # x: (B, 18, 8, 8)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.view(x.size(0), -1)      # (B, 64*8*8)
+        x = F.relu(self.fc_shared(x))  # (B, 512)
+
+        policy_logits = self.policy_head(x)                  # (B, 20480)
+        value_before = torch.tanh(self.value_before_head(x))        # (B, 1)
+        value_after_best = torch.tanh(self.value_after_best_head(x))  # (B, 1)
+        delta_pred = torch.tanh(self.delta_head(x))                 # (B, 1)
+
+        return policy_logits, value_before, value_after_best, delta_pred
+
+
+def train_one_epoch(
+    model,
+    dataloader,
+    optimizer,
+    device,
+    w_value_before: float = 1.0,
+    w_value_after: float = 1.0,
+    w_delta: float = 1.0,
+):
     model.train()
-    
-    policy_loss_meter = AverageMeter('policy_loss')
-    value_loss_meter = AverageMeter('value_loss')
-    total_loss_meter = AverageMeter('total_loss')
-    
-    for batch_idx, (planes, move_indices, results) in enumerate(dataloader):
-        planes = planes.to(device)
-        move_indices = move_indices.to(device)
-        results = results.to(device)
-        
-        # Forward pass
-        policy_logits, value_pred = model(planes)
-        
-        # Policy loss (cross-entropy)
-        policy_loss = nn.functional.cross_entropy(policy_logits, move_indices)
-        
-        # Value loss (MSE)
-        value_loss = nn.functional.mse_loss(value_pred.squeeze(), results)
-        
-        # Combined loss
-        total_loss = policy_loss + value_loss
-        
-        # Backward pass
+    ce_loss_fn = nn.CrossEntropyLoss()
+    mse_loss_fn = nn.MSELoss()
+
+    total_loss = 0.0
+    total_policy_loss = 0.0
+    total_vb_loss = 0.0
+    total_va_loss = 0.0
+    total_delta_loss = 0.0
+    total_samples = 0
+
+    for batch in dataloader:
+        planes = batch["planes"].to(device)          # (B, 18, 8, 8)
+        policy_idx = batch["policy_idx"].to(device)  # (B,)
+        value_before_t = batch["value_before"].to(device)          # (B,)
+        value_after_best_t = batch["value_after_best"].to(device)  # (B,)
+        delta_target_t = batch["delta_target"].to(device)          # (B,)
+
         optimizer.zero_grad()
-        total_loss.backward()
+
+        (policy_logits,
+         value_before_pred,
+         value_after_best_pred,
+         delta_pred) = model(planes)
+
+        # policy loss
+        policy_loss = ce_loss_fn(policy_logits, policy_idx)
+
+        # regression losses
+        value_before_pred = value_before_pred.squeeze(-1)  # (B,)
+        value_after_best_pred = value_after_best_pred.squeeze(-1)
+        delta_pred = delta_pred.squeeze(-1)
+
+        vb_loss = mse_loss_fn(value_before_pred, value_before_t)
+        va_loss = mse_loss_fn(value_after_best_pred, value_after_best_t)
+        d_loss = mse_loss_fn(delta_pred, delta_target_t)
+
+        loss = (
+            policy_loss
+            + w_value_before * vb_loss
+            + w_value_after * va_loss
+            + w_delta * d_loss
+        )
+
+        loss.backward()
         optimizer.step()
-        
-        # Update meters
-        policy_loss_meter.update(policy_loss.item())
-        value_loss_meter.update(value_loss.item())
-        total_loss_meter.update(total_loss.item())
-        
-        if batch_idx % 100 == 0:
-            logger.info(f"Batch {batch_idx}/{len(dataloader)}: "
-                       f"policy_loss={policy_loss.item():.4f}, "
-                       f"value_loss={value_loss.item():.4f}, "
-                       f"total_loss={total_loss.item():.4f}")
-    
+
+        bsz = planes.size(0)
+        total_samples += bsz
+        total_loss += loss.item() * bsz
+        total_policy_loss += policy_loss.item() * bsz
+        total_vb_loss += vb_loss.item() * bsz
+        total_va_loss += va_loss.item() * bsz
+        total_delta_loss += d_loss.item() * bsz
+
+    avg_loss = total_loss / total_samples
+    avg_policy_loss = total_policy_loss / total_samples
+    avg_vb_loss = total_vb_loss / total_samples
+    avg_va_loss = total_va_loss / total_samples
+    avg_delta_loss = total_delta_loss / total_samples
+
     return {
-        'policy_loss': policy_loss_meter.avg,
-        'value_loss': value_loss_meter.avg,
-        'total_loss': total_loss_meter.avg
+        "loss": avg_loss,
+        "policy_loss": avg_policy_loss,
+        "value_before_loss": avg_vb_loss,
+        "value_after_best_loss": avg_va_loss,
+        "delta_loss": avg_delta_loss,
     }
 
 
-def validate(model, dataloader, device):
-    """Validate model."""
+@torch.no_grad()
+def evaluate(
+    model,
+    dataloader,
+    device,
+    w_value_before: float = 1.0,
+    w_value_after: float = 1.0,
+    w_delta: float = 1.0,
+    print_examples: bool = True,
+    num_examples: int = 5,
+):
+    """
+    Validation loop that computes losses and optionally prints some
+    predicted move indices vs best-move indices.
+    """
     model.eval()
-    
-    policy_loss_meter = AverageMeter()
-    value_loss_meter = AverageMeter()
-    total_loss_meter = AverageMeter()
-    
-    with torch.no_grad():
-        for planes, move_indices, results in dataloader:
-            planes = planes.to(device)
-            move_indices = move_indices.to(device)
-            results = results.to(device)
-            
-            policy_logits, value_pred = model(planes)
-            
-            policy_loss = nn.functional.cross_entropy(policy_logits, move_indices)
-            value_loss = nn.functional.mse_loss(value_pred.squeeze(), results)
-            total_loss = policy_loss + value_loss
-            
-            policy_loss_meter.update(policy_loss.item())
-            value_loss_meter.update(value_loss.item())
-            total_loss_meter.update(total_loss.item())
-    
+    ce_loss_fn = nn.CrossEntropyLoss()
+    mse_loss_fn = nn.MSELoss()
+
+    total_loss = 0.0
+    total_policy_loss = 0.0
+    total_vb_loss = 0.0
+    total_va_loss = 0.0
+    total_delta_loss = 0.0
+    total_samples = 0
+
+    examples_printed = 0
+
+    for batch in dataloader:
+        planes = batch["planes"].to(device)          # (B, 18, 8, 8)
+        policy_idx = batch["policy_idx"].to(device)  # (B,)
+        value_before_t = batch["value_before"].to(device)          # (B,)
+        value_after_best_t = batch["value_after_best"].to(device)  # (B,)
+        delta_target_t = batch["delta_target"].to(device)          # (B,)
+
+        (policy_logits,
+         value_before_pred,
+         value_after_best_pred,
+         delta_pred) = model(planes)
+
+        policy_loss = ce_loss_fn(policy_logits, policy_idx)
+
+        value_before_pred = value_before_pred.squeeze(-1)
+        value_after_best_pred = value_after_best_pred.squeeze(-1)
+        delta_pred = delta_pred.squeeze(-1)
+
+        vb_loss = mse_loss_fn(value_before_pred, value_before_t)
+        va_loss = mse_loss_fn(value_after_best_pred, value_after_best_t)
+        d_loss = mse_loss_fn(delta_pred, delta_target_t)
+
+        loss = (
+            policy_loss
+            + w_value_before * vb_loss
+            + w_value_after * va_loss
+            + w_delta * d_loss
+        )
+
+        bsz = planes.size(0)
+        total_samples += bsz
+        total_loss += loss.item() * bsz
+        total_policy_loss += policy_loss.item() * bsz
+        total_vb_loss += vb_loss.item() * bsz
+        total_va_loss += va_loss.item() * bsz
+        total_delta_loss += d_loss.item() * bsz
+
+        # Print a few prediction vs target examples
+        if print_examples and examples_printed < num_examples:
+            # predicted move indices: argmax over policy logits
+            preds = policy_logits.argmax(dim=1)  # (B,)
+            for i in range(bsz):
+                if examples_printed >= num_examples:
+                    break
+                pred_idx = preds[i].item()
+                true_idx = policy_idx[i].item()
+                print(f"  Example {examples_printed + 1}: pred={pred_idx}, best={true_idx}")
+                examples_printed += 1
+
+    avg_loss = total_loss / total_samples
+    avg_policy_loss = total_policy_loss / total_samples
+    avg_vb_loss = total_vb_loss / total_samples
+    avg_va_loss = total_va_loss / total_samples
+    avg_delta_loss = total_delta_loss / total_samples
+
     return {
-        'policy_loss': policy_loss_meter.avg,
-        'value_loss': value_loss_meter.avg,
-        'total_loss': total_loss_meter.avg
+        "loss": avg_loss,
+        "policy_loss": avg_policy_loss,
+        "value_before_loss": avg_vb_loss,
+        "value_after_best_loss": avg_va_loss,
+        "delta_loss": avg_delta_loss,
     }
 
 
-def main():
-    args = parse_args()
-    
-    # Load config
-    config = load_config(args.config)
-    train_config = config['training']['supervised']
-    model_config = config['model']
-    
-    # Setup logger
-    logger = setup_logger('train_supervised')
-    logger.info(f"Training configuration: {train_config}")
-    
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
-    
-    # Load dataset
-    logger.info(f"Loading dataset from {args.dataset}")
-    dataset = PGNDataset(args.dataset)
-    
-    # Split train/val
-    train_size = int(train_config['train_split'] * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    
-    logger.info(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
-    
-    # Create dataloaders
+def main_train():
+    npz_path = r"training\data\processed\sf_supervised_dataset2425.npz"
+
+    batch_size = 32
+    num_epochs = 10
+    lr = 1e-3
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    # Full dataset
+    full_dataset = SFNPZDataset(npz_path)
+
+    # --- train/validation split ---
+    val_frac = 0.25
+    val_size = int(len(full_dataset) * val_frac)
+    train_size = len(full_dataset) - val_size
+
+    # Optional: fix seed for reproducibility
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+
+    print(f"Train size: {train_size}, Val size: {val_size}")
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=train_config['batch_size'],
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=4
+        collate_fn=collate_sf,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=train_config['batch_size'],
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=4
+        collate_fn=collate_sf,
     )
-    
-    # Create model
-    logger.info("Creating model")
-    model = create_model(model_config)
-    model = model.to(device)
-    
-    # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=train_config['learning_rate'],
-        weight_decay=train_config['weight_decay']
-    )
-    
-    # Training loop
-    start_epoch = 0
-    best_val_loss = float('inf')
-    
-    for epoch in range(start_epoch, train_config['epochs']):
-        logger.info(f"\nEpoch {epoch + 1}/{train_config['epochs']}")
-        
-        # Train
-        train_metrics = train_epoch(model, train_loader, optimizer, device, logger)
-        log_metrics(logger, train_metrics, epoch=epoch + 1)
-        
-        # Validate
-        val_metrics = validate(model, val_loader, device)
-        log_metrics(logger, {f"val_{k}": v for k, v in val_metrics.items()}, epoch=epoch + 1)
-        
-        # Save checkpoint
-        is_best = val_metrics['total_loss'] < best_val_loss
-        if is_best:
-            best_val_loss = val_metrics['total_loss']
-        
-        checkpoint_path = Path(args.output_dir) / f"checkpoint_epoch_{epoch + 1:03d}.pt"
-        save_checkpoint(
-            model, optimizer, epoch + 1,
-            {'train': train_metrics, 'val': val_metrics},
-            checkpoint_path,
-            is_best=is_best
+
+    model = DummyChessModel(policy_dim=POLICY_DIM).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+
+
+    w_vb = 0.8
+    w_va = 0.8
+    w_delta = 0.2
+
+    for epoch in range(1, num_epochs + 1):
+        train_stats = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            w_value_before=w_vb,
+            w_value_after=w_va,
+            w_delta=w_delta,
         )
-        
-        # Cleanup old checkpoints
-        cleanup_old_checkpoints(args.output_dir, keep_last_n=5)
-    
-    logger.info("\nTraining complete!")
+
+        print(
+            f"Epoch {epoch} TRAIN: "
+            f"loss={train_stats['loss']:.4f}, "
+            f"policy={train_stats['policy_loss']:.4f}, "
+            f"vb={train_stats['value_before_loss']:.4f}, "
+            f"va={train_stats['value_after_best_loss']:.4f}, "
+            f"delta={train_stats['delta_loss']:.4f}"
+        )
+
+        # --- Validation + example predictions ---
+        print(f"Epoch {epoch} VAL:")
+        val_stats = evaluate(
+            model,
+            val_loader,
+            device,
+            w_value_before=w_vb,
+            w_value_after=w_va,
+            w_delta=w_delta,
+            print_examples=True,
+            num_examples=5,  # adjust if you want more/less
+        )
+
+        print(
+            f"Epoch {epoch} VAL STATS: "
+            f"loss={val_stats['loss']:.4f}, "
+            f"policy={val_stats['policy_loss']:.4f}, "
+            f"vb={val_stats['value_before_loss']:.4f}, "
+            f"va={val_stats['value_after_best_loss']:.4f}, "
+            f"delta={val_stats['delta_loss']:.4f}"
+        )
+
+    torch.save(model.state_dict(), "model_policy_value_multihead.pth")
+    print("Saved model to model_policy_value_multihead.pth")
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    main_train()

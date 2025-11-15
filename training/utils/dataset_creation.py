@@ -11,18 +11,19 @@ import random
 PGN_PATH = Path(r"LumbrasGigaBase_OTB_2020-2024.pgn")
 
 # Where to save the dataset:
+OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset2425.npz")
 OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset2024.npz")
 
 # Path to Stockfish binary:
 ENGINE_PATH = r"stockfish/stockfish-windows-x86-64-avx2.exe"  # fix slashes or use raw string
 
 SAMPLE_EVERY = 1      # 1 = every ply, 2 = every second ply, etc.
-MAX_GAMES = None         # or None for all games
+MAX_GAMES = 400         # or None for all games
 TIME_LIMIT = 0.05     # seconds per position if DEPTH is None
 DEPTH = 14            # e.g. 16 for fixed depth instead of time
 
 # Debug controls:
-DEBUG = True         # set True for verbose per-game/per-ply debug
+DEBUG = False         # set True for verbose per-game/per-ply debug
 DEBUG_GAMES = 1       # how many games to print debug info for
 DEBUG_PLY_LIMIT = 5   # how many plies per debug game to print
 POSTHOC_DEBUG_SAMPLES = 5  # how many random samples to inspect at the end

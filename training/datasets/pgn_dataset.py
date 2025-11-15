@@ -1,82 +1,66 @@
-import torch
-from torch.utils.data import Dataset
 import numpy as np
-import chess
-import chess.pgn
-import io
+import torch
+from torch.utils.data import Dataset, DataLoader
 
+POLICY_DIM = 64 * 64 * 5  # 20,480
 
-class PGNDataset(Dataset):
+class SFNPZDataset(Dataset):
     """
-    Dataset for training from PGN files.
-    
-    Converts chess positions from PGN games into (planes, move_index, result) tuples.
+    Dataset for Stockfish-labeled NPZ.
+
+    Trains on:
+      - policy_idx : best-move index (int)
+      - value_before      : scaled cp_before
+      - value_after_best  : scaled cp_after_best
+      - delta_target      : scaled delta_cp
     """
-    
-    def __init__(self, npz_path, transform=None):
-        """
-        Args:
-            npz_path: Path to preprocessed NPZ file
-            transform: Optional transforms to apply
-        """
+
+    def __init__(
+        self,
+        npz_path: str,
+        cp_scale: float = 400.0,
+        delta_scale: float = 200.0,
+    ):
         data = np.load(npz_path)
-        self.planes = data['planes']  # (N, 27, 8, 8)
-        self.move_indices = data['move_indices']  # (N,)
-        self.results = data['results']  # (N,)
-        self.transform = transform
-        
-    def __len__(self):
-        return len(self.planes)
-    
-    def __getitem__(self, idx):
-        planes = torch.from_numpy(self.planes[idx]).float()
-        move_idx = torch.tensor(self.move_indices[idx], dtype=torch.long)
-        result = torch.tensor(self.results[idx], dtype=torch.float32)
-        
-        if self.transform:
-            planes = self.transform(planes)
-        
-        return planes, move_idx, result
+
+        # Required fields from your generator
+        self.X = data["X"]                       # (N, 18, 8, 8)
+        self.y_policy_best = data["y_policy_best"]  # (N,)
+        self.cp_before = data["cp_before"]       # (N,)
+        self.cp_after_best = data["cp_after_best"]  # (N,)
+        self.delta_cp = data["delta_cp"]         # (N,)
+
+        # Precompute regression targets, scaled into [-1, 1]
+        self.value_before = np.tanh(self.cp_before / cp_scale).astype(np.float32)
+        self.value_after_best = np.tanh(self.cp_after_best / cp_scale).astype(np.float32)
+        self.delta_target = np.tanh(self.delta_cp / delta_scale).astype(np.float32)
+
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        planes = torch.from_numpy(self.X[idx]).float()  # (18, 8, 8)
+        policy_idx = torch.tensor(int(self.y_policy_best[idx]), dtype=torch.long)
+
+        value_before = torch.tensor(self.value_before[idx], dtype=torch.float32)
+        value_after_best = torch.tensor(self.value_after_best[idx], dtype=torch.float32)
+        delta_target = torch.tensor(self.delta_target[idx], dtype=torch.float32)
+
+        return {
+            "planes": planes,
+            "policy_idx": policy_idx,
+            "value_before": value_before,
+            "value_after_best": value_after_best,
+            "delta_target": delta_target,
+        }
 
 
-class StreamingPGNDataset(Dataset):
+def collate_sf(batch):
     """
-    Dataset that streams PGN data without loading everything into memory.
-    
-    Useful for very large PGN collections.
+    Collate dict -> dict of batched tensors.
     """
-    
-    def __init__(self, pgn_paths, max_games=None):
-        """
-        Args:
-            pgn_paths: List of paths to PGN files
-            max_games: Maximum number of games to load (None = all)
-        """
-        self.pgn_paths = pgn_paths if isinstance(pgn_paths, list) else [pgn_paths]
-        self.max_games = max_games
-        self.positions = []
-        self._load_positions()
-        
-    def _load_positions(self):
-        """Load positions from PGN files."""
-        # TODO: Implement streaming PGN parsing
-        # For now, placeholder
-        pass
-    
-    def __len__(self):
-        return len(self.positions)
-    
-    def __getitem__(self, idx):
-        # TODO: Return (planes, move_idx, result)
-        raise NotImplementedError()
-
-
-def collate_fn(batch):
-    """Custom collate function for batching."""
-    planes, move_indices, results = zip(*batch)
-    
-    planes = torch.stack(planes, dim=0)
-    move_indices = torch.stack(move_indices, dim=0)
-    results = torch.stack(results, dim=0)
-    
-    return planes, move_indices, results
+    out = {}
+    keys = batch[0].keys()
+    for k in keys:
+        out[k] = torch.stack([b[k] for b in batch], dim=0)
+    return out
