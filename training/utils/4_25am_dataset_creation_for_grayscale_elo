@@ -1,0 +1,274 @@
+import chess
+import chess.pgn
+import chess.engine
+import numpy as np
+from pathlib import Path
+from typing import Optional, Tuple
+import random
+
+#======== TO CHANGE BELOW ========
+PGN_PATH = Path(r"LumbrasGigaBase_OTB_2020-2024.pgn")     #put your file path here
+
+OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset2024.npz")  #put your desired output path here
+
+
+#don't worry about this path, it's just where the Stockfish engine is located on your machine:
+ENGINE_PATH = r"stockfish/stockfish-windows-x86-64-avx2.exe"
+SAMPLE_EVERY = 1      # 1 = every ply, 2 = every second ply, etc.
+MAX_GAMES = 200       # or None for all games
+TIME_LIMIT = 0.05     # seconds per position if DEPTH is None
+DEPTH = 8             # reduced depth for speed of evaluation 
+
+# Debug controls:
+DEBUG = False         
+DEBUG_GAMES = 1       
+DEBUG_PLY_LIMIT = 5   
+POSTHOC_DEBUG_SAMPLES = 5  
+
+# Clipping/normalization for centipawn deltas
+MAX_CP_DELTA = 1000   # values beyond ±1000 cp will be clipped and normalized
+# ----------------------------------------
+
+# ---------- Stockfish wrapper ----------
+class StockfishEvaluator:
+    def __init__(self, engine_path: str, time_limit: float = 0.1, depth: Optional[int] = None):
+        self.engine_path = str(engine_path)
+        self.engine = chess.engine.SimpleEngine.popen_uci(Path(engine_path))
+        self.time_limit = time_limit
+        self.depth = depth
+
+    def _make_limit(self) -> chess.engine.Limit:
+        if self.depth is not None:
+            return chess.engine.Limit(depth=self.depth)
+        return chess.engine.Limit(time=self.time_limit)
+
+    def eval_and_best(self, board: chess.Board) -> Tuple[int, Optional[chess.Move]]:
+        limit = self._make_limit()
+        info = self.engine.analyse(board, limit)
+        score = info["score"].pov(board.turn)
+
+        if score.is_mate():
+            mate_in = score.mate()
+            sign = 1 if mate_in is None or mate_in > 0 else -1
+            cp = 10000 * sign
+        else:
+            cp = score.score(mate_score=10000)
+
+        pv = info.get("pv", None)
+        best_move = pv[0] if pv else None
+
+        return int(cp), best_move
+
+    def evaluate_cp(self, board: chess.Board) -> int:
+        limit = self._make_limit()
+        info = self.engine.analyse(board, limit)
+        score = info["score"].pov(board.turn)
+
+        if score.is_mate():
+            mate_in = score.mate()
+            sign = 1 if mate_in is None or mate_in > 0 else -1
+            cp = 10000 * sign
+        else:
+            cp = score.score(mate_score=10000)
+        return int(cp)
+
+    def close(self):
+        self.engine.quit()
+
+
+# ---------- Board encoding ----------
+PIECE_PLANES = {
+    (chess.PAWN,   chess.WHITE): 0,
+    (chess.KNIGHT, chess.WHITE): 1,
+    (chess.BISHOP, chess.WHITE): 2,
+    (chess.ROOK,   chess.WHITE): 3,
+    (chess.QUEEN,  chess.WHITE): 4,
+    (chess.KING,   chess.WHITE): 5,
+    (chess.PAWN,   chess.BLACK): 6,
+    (chess.KNIGHT, chess.BLACK): 7,
+    (chess.BISHOP, chess.BLACK): 8,
+    (chess.ROOK,   chess.BLACK): 9,
+    (chess.QUEEN,  chess.BLACK): 10,
+    (chess.KING,   chess.BLACK): 11,
+}
+NUM_PLANES = 18
+
+def fen_to_planes(fen: str) -> np.ndarray:
+    board = chess.Board(fen)
+    planes = np.zeros((NUM_PLANES, 8, 8), dtype=np.float32)
+
+    for square, piece in board.piece_map().items():
+        p_idx = PIECE_PLANES[(piece.piece_type, piece.color)]
+        rank = 7 - chess.square_rank(square)
+        file = chess.square_file(square)
+        planes[p_idx, rank, file] = 1.0
+
+    planes[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
+
+    if board.has_kingside_castling_rights(chess.WHITE):
+        planes[13, :, :] = 1.0
+    if board.has_queenside_castling_rights(chess.WHITE):
+        planes[14, :, :] = 1.0
+    if board.has_kingside_castling_rights(chess.BLACK):
+        planes[15, :, :] = 1.0
+    if board.has_queenside_castling_rights(chess.BLACK):
+        planes[16, :, :] = 1.0
+
+    if board.ep_square is not None:
+        ep_file = chess.square_file(board.ep_square)
+        planes[17, :, ep_file] = 1.0
+
+    return planes
+
+
+# ---------- Move encoding ----------
+PROMO_PIECES = [None, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
+NUM_PROMOS = len(PROMO_PIECES)
+POLICY_DIM = 64 * 64 * NUM_PROMOS
+
+def encode_move_components(from_sq: int, to_sq: int, promo_piece) -> int:
+    promo_idx = PROMO_PIECES.index(promo_piece)
+    return (from_sq * 64 + to_sq) * NUM_PROMOS + promo_idx
+
+def move_to_index(move: chess.Move) -> int:
+    from_sq = move.from_square
+    to_sq = move.to_square
+    promo_piece = move.promotion if move.promotion is not None else None
+    return encode_move_components(from_sq, to_sq, promo_piece)
+
+
+# ---------- Helpers ----------
+def pgn_result_to_outcome_white(result_str: str) -> Optional[float]:
+    if result_str == "1-0": return 1.0
+    if result_str == "0-1": return -1.0
+    if result_str == "1/2-1/2": return 0.0
+    return None
+
+def outcome_from_side_to_move(fen: str, outcome_white: float) -> float:
+    board = chess.Board(fen)
+    if outcome_white == 0.0: return 0.0
+    return outcome_white if board.turn == chess.WHITE else -outcome_white
+
+
+# ---------- Main ----------
+def main():
+    if not PGN_PATH.exists():
+        raise FileNotFoundError(f"PGN file not found: {PGN_PATH}")
+
+    print(f"Using PGN: {PGN_PATH}")
+    print(f"Stockfish: {ENGINE_PATH}")
+    print(f"Output   : {OUT_PATH}")
+    print(f"sample_every={SAMPLE_EVERY}, max_games={MAX_GAMES}, "
+          f"time_limit={TIME_LIMIT}, depth={DEPTH}")
+    print(f"Policy dimension = {POLICY_DIM}")
+
+    sf = StockfishEvaluator(ENGINE_PATH, time_limit=TIME_LIMIT, depth=DEPTH)
+
+    X_list, y_policy_best_list = [], []
+    cp_before_list, cp_after_best_list, delta_cp_list = [], [], []
+    human_move_idx_list, human_delta_list, game_result_list = [], [], []
+
+    debug_games_printed = 0
+    game_count = 0
+
+    with open(PGN_PATH, encoding="utf-8", errors="ignore") as f:
+        while True:
+            game = chess.pgn.read_game(f)
+            if game is None: break
+            game_count += 1
+            if MAX_GAMES is not None and game_count > MAX_GAMES: break
+
+            result_str = game.headers.get("Result", "*")
+            outcome_white = pgn_result_to_outcome_white(result_str)
+            if outcome_white is None: continue
+
+            board = game.board()
+            if board.fen().split(" ")[0] != chess.STARTING_FEN.split(" ")[0]:
+                continue  # skip non-standard
+
+            ply_idx = 0
+            for move in game.mainline_moves():
+                fen_before = board.fen()
+
+                if ply_idx % SAMPLE_EVERY == 0:
+                    if move not in board.legal_moves:
+                        board.push(move)
+                        ply_idx += 1
+                        continue
+
+                    planes = fen_to_planes(fen_before)
+
+                    try:
+                        cp_before_stm, best_move = sf.eval_and_best(board)
+                        if best_move is None: raise Exception("No best move")
+                        board_best = board.copy()
+                        board_best.push(best_move)
+                        cp_after_best_stm = sf.evaluate_cp(board_best)
+                        cp_after_best = -float(cp_after_best_stm)
+                        delta_cp = cp_after_best - float(cp_before_stm)
+                        # normalize delta_cp
+                        delta_cp = max(-MAX_CP_DELTA, min(MAX_CP_DELTA, delta_cp)) / MAX_CP_DELTA
+                    except Exception as e:
+                        print(f"SF error (best move), skipping: {e}")
+                        board.push(move)
+                        ply_idx += 1
+                        continue
+
+                    try:
+                        board_human = board.copy()
+                        board_human.push(move)
+                        cp_after_human_stm = sf.evaluate_cp(board_human)
+                        cp_after_human = -float(cp_after_human_stm)
+                        raw_delta = cp_after_human - float(cp_before_stm)
+                        # clip and normalize
+                        human_delta = max(-MAX_CP_DELTA, min(MAX_CP_DELTA, raw_delta)) / MAX_CP_DELTA
+                        human_move_idx = move_to_index(move)
+                    except Exception as e:
+                        human_delta = 0.0
+                        human_move_idx = -1
+
+                    z = outcome_from_side_to_move(fen_before, float(outcome_white))
+
+                    X_list.append(planes)
+                    y_policy_best_list.append(move_to_index(best_move))
+                    cp_before_list.append(float(cp_before_stm))
+                    cp_after_best_list.append(cp_after_best)
+                    delta_cp_list.append(delta_cp)
+                    human_move_idx_list.append(human_move_idx)
+                    human_delta_list.append(human_delta)
+                    game_result_list.append(z)
+
+                board.push(move)
+                ply_idx += 1
+
+    sf.close()
+
+    # convert to arrays
+    X = np.stack(X_list).astype(np.float32)
+    y_policy_best = np.array(y_policy_best_list, dtype=np.int64)
+    cp_before = np.array(cp_before_list, dtype=np.float32)
+    cp_after_best = np.array(cp_after_best_list, dtype=np.float32)
+    delta_cp = np.array(delta_cp_list, dtype=np.float32)
+    human_move_idx = np.array(human_move_idx_list, dtype=np.int64)
+    human_delta = np.array(human_delta_list, dtype=np.float32)
+    game_result = np.array(game_result_list, dtype=np.float32)
+
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        OUT_PATH,
+        X=X,
+        y_policy_best=y_policy_best,
+        cp_before=cp_before,
+        cp_after_best=cp_after_best,
+        delta_cp=delta_cp,
+        human_move_idx=human_move_idx,
+        human_delta=human_delta,
+        game_result=game_result,
+    )
+
+    print(f"Saved dataset to {OUT_PATH}")
+    print(f"Final dataset size: {X.shape[0]} positions")
+    print("delta_cp [-1,1] normalized, human_delta [-1,1] normalized")
+
+if __name__ == "__main__":
+    main()
