@@ -58,7 +58,6 @@ Makefile
 *.pth
 *.onnx
 training/data/raw_pgn/*.pgn
-training/data/processed/*.npz
 training/data/processed/*.hdf5
 
 # Self-play
@@ -73,3 +72,4 @@ weights/distilled/*.pt
 *.log
 *.tmp
 .cache/
+LumbrasGigaBase_OTB_2020-2024.pgn
