@@ -8,11 +8,10 @@ import random
 
 # ---------- CONFIG: EDIT THESE ----------
 # Your big PGN file:
-PGN_PATH = Path(r"LumbrasGigaBase_OTB_2020-2024.pgn")
+PGN_PATH = Path(r"training\utils\LumbrasGigaBase_OTB_2015-2019.pgn")
 
 # Where to save the dataset:
-OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset2425.npz")
-OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset2024.npz")
+OUT_PATH = Path(r"training/data/processed/sf_supervised_dataset1519.npz")
 
 # Path to Stockfish binary:
 ENGINE_PATH = r"stockfish/stockfish-windows-x86-64-avx2.exe"  # fix slashes or use raw string
