@@ -72,3 +72,4 @@ weights/distilled/*.pt
 *.log
 *.tmp
 .cache/
+LumbrasGigaBase_OTB_2020-2024.pgn

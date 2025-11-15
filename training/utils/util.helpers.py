@@ -1,0 +1,98 @@
+# utils_helpers.py
+import chess
+import numpy as np
+
+# ---------- Constants ----------
+# Piece planes (for board encoding/decoding)
+PIECE_PLANES = {
+    (chess.PAWN,   chess.WHITE): 0,
+    (chess.KNIGHT, chess.WHITE): 1,
+    (chess.BISHOP, chess.WHITE): 2,
+    (chess.ROOK,   chess.WHITE): 3,
+    (chess.QUEEN,  chess.WHITE): 4,
+    (chess.KING,   chess.WHITE): 5,
+    (chess.PAWN,   chess.BLACK): 6,
+    (chess.KNIGHT, chess.BLACK): 7,
+    (chess.BISHOP, chess.BLACK): 8,
+    (chess.ROOK,   chess.BLACK): 9,
+    (chess.QUEEN,  chess.BLACK): 10,
+    (chess.KING,   chess.BLACK): 11,
+}
+
+NUM_PLANES = 18  # 12 pieces + 1 stm + 4 castling + 1 ep-file
+
+# Promotion pieces mapping
+PROMO_PIECES = [None, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
+
+data = np.load("training\data\processed\sf_supervised_dataset2024.npz")  # replace with your dataset path
+print(data.files)
+
+# Policy size
+POLICY_DIM = 64 * 64 * len(PROMO_PIECES)  # 20480
+
+
+# ---------- Move encoding ----------
+def move_to_index(move: chess.Move) -> int:
+    """
+    Converts a chess.Move to an integer index in [0, 20479]
+    """
+    from_sq = move.from_square
+    to_sq = move.to_square
+    promo_piece = move.promotion if move.promotion is not None else None
+    promo_idx = PROMO_PIECES.index(promo_piece)
+    return (from_sq * 64 + to_sq) * len(PROMO_PIECES) + promo_idx
+
+
+# ---------- Board encoding/decoding ----------
+def planes_to_board(planes: np.ndarray) -> chess.Board:
+    """
+    Converts planes (18,8,8) back to a chess.Board
+    """
+    board = chess.Board(fen=chess.STARTING_FEN)
+    board.clear_board()
+
+    # Pieces
+    for (piece_type, color), idx in PIECE_PLANES.items():
+        plane = planes[idx]
+        for rank in range(8):
+            for file in range(8):
+                if plane[rank, file] > 0:
+                    square = chess.square(file, 7 - rank)
+                    board.set_piece_at(square, chess.Piece(piece_type, color))
+
+    # Side to move
+    board.turn = chess.WHITE if planes[12, 0, 0] > 0 else chess.BLACK
+
+    # Castling rights
+    if planes[13].any():
+        board.castling_rights |= chess.BB_H1
+    if planes[14].any():
+        board.castling_rights |= chess.BB_A1
+    if planes[15].any():
+        board.castling_rights |= chess.BB_H8
+    if planes[16].any():
+        board.castling_rights |= chess.BB_A8
+
+    # En passant
+    ep_plane = planes[17]
+    files_with_ep = np.where(ep_plane[0] > 0)[0]
+    if len(files_with_ep) > 0:
+        ep_file = files_with_ep[0]
+        rank = 3 if board.turn == chess.WHITE else 4
+        board.ep_square = chess.square(ep_file, rank)
+    else:
+        board.ep_square = None
+
+    return board
+
+
+# ---------- Legal moves binary array ----------
+def legal_moves_binary_array(board: chess.Board) -> np.ndarray:
+    """
+    Returns a 20480-length binary array indicating which moves are legal
+    from the given board.
+    """
+    arr = np.zeros(POLICY_DIM, dtype=np.uint8)
+    for move in board.legal_moves:
+        arr[move_to_index(move)] = 1
+    return arr

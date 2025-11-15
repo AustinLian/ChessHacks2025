@@ -110,16 +110,28 @@ class ResNetPolicyValue(nn.Module):
             return policy, value
 
 
-def create_model(config=None):
-    """Factory function to create model from config."""
-    if config is None:
-        config = {
-            'num_blocks': 10,
-            'channels': 128,
-            'input_planes': 27,
-            'policy_channels': 32,
-            'value_channels': 32,
-            'policy_size': 4672,
-        }
+def create_model(config):
+    """
+    Create a ResNetPolicyValue model from a config dictionary.
+
+    Expects config to have:
+        - 'num_planes' (number of input planes / channels)
+        - 'policy_dim' (size of the policy output)
+    """
+    input_planes = config.get('num_planes', 27)          # default 27
+    policy_size = config.get('policy_dim', 4672)        # default 4672
+    num_blocks = config.get('num_blocks', 10)
+    channels = config.get('channels', 128)
+    policy_channels = config.get('policy_channels', 32)
+    value_channels = config.get('value_channels', 32)
+
+    return ResNetPolicyValue(
+        num_blocks=num_blocks,
+        channels=channels,
+        input_planes=input_planes,
+        policy_channels=policy_channels,
+        value_channels=value_channels,
+        policy_size=policy_size
+    )
+
     
-    return ResNetPolicyValue(**config)
