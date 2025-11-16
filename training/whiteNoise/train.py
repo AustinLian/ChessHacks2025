@@ -28,7 +28,7 @@ import random
 # ============================================================================
 
 class Config:
-    DATASET_FOLDER = r"training\whiteNoise\processed"
+    DATASET_FOLDER = r"training\whiteNoise/processed"
     OUTPUT_DIR = "checkpoints_delta_resnet20"
 
     EPOCHS = 20

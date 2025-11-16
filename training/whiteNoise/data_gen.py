@@ -39,7 +39,7 @@ import random
 # =====================================================================
 
 class Config:
-    ENGINE_PATH = r"C:\Users\ethan\Downloads\ChessHacks\ChessHacks2025\training\whiteNoise\stockfish-windows-x86-64-avx2.exe"
+    ENGINE_PATH = r"F:/VS Code Storage/ChessHacks2025/training\whiteNoise\stockfish-windows-x86-64-avx2.exe"
 
     DEPTH = 12                  # use fixed depth for reproducibility
     TIME_LIMIT = None           # or e.g. 0.03 for time-based
@@ -47,7 +47,7 @@ class Config:
     MAX_MOVES_PER_GAME = 200
 
     SHARD_SIZE = 50_000         # NPZ entries per shard
-    OUTPUT_DIR = r"training\whiteNoise\processed"
+    OUTPUT_DIR = r"training\whiteNoise/processed"
 
     DIRICHLET_ALPHA = 0.3
     TEMPERATURE = 1.2           # >1 = more randomness
@@ -327,7 +327,7 @@ def main():
 
     sf = StockfishEvaluator(cfg.ENGINE_PATH, depth=cfg.DEPTH, time_limit=cfg.TIME_LIMIT)
 
-    shard_id = 1
+    shard_id = 1 #MANUALLY CHANGE EVERYTIME TO AVOID OVERWRITING
     buffer = []
 
     print("Starting self-play...")
@@ -348,7 +348,7 @@ def main():
                 delta_cp = np.array([b[4] for b in buffer], np.float32)
                 game_result = np.array([b[5] for b in buffer], np.float32)
 
-                save_path = out / f"shard_{shard_id:05d}.npz"
+                save_path = out / f"gz_shard_{shard_id:05d}.npz"
                 np.savez_compressed(
                     save_path,
                     X=X,

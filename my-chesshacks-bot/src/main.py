@@ -16,7 +16,7 @@ import torch.nn as nn
 # ============================================================
 
 MODEL_PATH = Path(
-    r"C:\Users\ethan\Downloads\ChessHacks\ChessHacks2025\training\whiteNoise\checkpoints_delta_resnet20\best.pt"
+    r"F:/VS Code Storage/ChessHacks2025/training\whiteNoise/checkpoints_delta_resnet20\best.pt"
 )
 
 NUM_PLANES = 18
